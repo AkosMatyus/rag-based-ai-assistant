@@ -1,0 +1,20 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Local Hugging Face / sentence-transformers model cache, if ever pointed locally
+.cache/
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
