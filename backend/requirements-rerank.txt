@@ -1,0 +1,5 @@
+# OPTIONAL - only needed with RERANK_ENABLED=true.
+# Ollama has no reranking API, so the cross-encoder reranker runs inside the
+# backend via sentence-transformers, which also installs PyTorch (CPU build
+# by default - see README "Optional: reranking" for the CUDA build).
+sentence-transformers>=3.0

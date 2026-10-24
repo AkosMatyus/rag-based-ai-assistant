@@ -1,6 +1,6 @@
 """Orchestrates the end-to-end ingestion pipeline for one repository:
 
-    GitHub tarball -> filter files -> split into chunks -> embed -> pgvector
+    GitHub tarball -> filter files -> split into chunks -> embed (Ollama) -> pgvector
 
 Runs as a FastAPI background task, so it owns its own DB session (the
 request-scoped session used by the endpoint that triggered it is already
@@ -8,7 +8,7 @@ closed by the time this executes).
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from database.database import AsyncSessionLocal
 from models.repository import Repository, RepositoryStatus, RepositoryAccess
@@ -16,7 +16,7 @@ from rag.embeddings import embed_texts
 from rag.github_loader import download_repo_files, fetch_default_branch
 from rag.text_splitter import split_file
 from rag.vector_store import ChunkRecord, replace_repository_chunks
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,49 @@ async def grant_repository_access(db: AsyncSession, user_id: int, repository_id:
     await db.commit()
 
 
+async def fail_interrupted_indexing(db: AsyncSession, older_than_minutes: int | None = None) -> int:
+    """Marks repositories stuck in "indexing" as failed, so they can be started again.
+
+    Ingestion runs as an in-process background task, so if the backend stops
+    mid-run (crash, Ctrl+C, a --reload restart) nothing is left to move the
+    repository out of "indexing" - and /rag/ingest refuses to start a repo
+    that is already indexing.
+
+    - Without ``older_than_minutes`` (called once at startup): every
+      "indexing" repository is failed, since no job can be running yet in a
+      process that has just started.
+    - With ``older_than_minutes`` (called from the status endpoints): only
+      jobs that started longer ago than that are failed - a safety net for a
+      job that hangs while the server keeps running.
+
+    Returns the number of repositories that were marked as failed.
+    """
+
+    stmt = update(Repository).where(Repository.status == RepositoryStatus.INDEXING)
+
+    if older_than_minutes is None:
+        message = "Indexing was interrupted because the server restarted. Start it again."
+    else:
+        # updated_at is last written when the job sets the status to
+        # "indexing", so it is effectively the job's start time.
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+        stmt = stmt.where(Repository.updated_at < cutoff)
+        message = (
+            f"Indexing didn't finish within {older_than_minutes} minutes, "
+            "so it was marked as failed. Start it again."
+        )
+
+    result = await db.execute(
+        stmt.values(status=RepositoryStatus.ERROR, error_message=message)
+        # Callers run this before loading any Repository into the session,
+        # so there are no in-memory objects that would need syncing.
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+
+    return result.rowcount or 0
+
+
 async def run_ingestion(repository_id: int, github_token: str | None) -> None:
     async with AsyncSessionLocal() as db:
         repository = await db.get(Repository, repository_id)
@@ -75,7 +118,7 @@ async def run_ingestion(repository_id: int, github_token: str | None) -> None:
             files = await download_repo_files(repository.owner, repository.name, branch, github_token)
 
             if not files:
-                raise ValueError("Nem található indexelhető szöveges/kód fájl a repóban.")
+                raise ValueError("No indexable text or source files were found in the repository.")
 
             chunk_records: list[ChunkRecord] = []
             all_texts: list[str] = []

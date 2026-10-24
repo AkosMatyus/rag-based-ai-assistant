@@ -1,108 +1,151 @@
+/* Design tokens and base styles. Component styles live in App.css. */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #eceef2;
+  --surface: #ffffff;
+  --surface-2: #f5f6f8;
+  --surface-3: #eaecf0;
+  --line: #dadee5;
+  --line-strong: #c4cad4;
+
+  --ink: #161a20;
+  --ink-2: #4b5260;
+  --ink-3: #767e8b;
+
+  --accent: #2e4fbf;
+  --accent-hover: #2742a3;
+  --accent-ink: #ffffff;
+  --accent-weak: #ebeffb;
+  --accent-line: #b9c6ef;
+
+  --ok: #1a7f42;
+  --warn: #9a6400;
+  --err: #b8361b;
+  --err-weak: #fbefec;
+  --err-line: #efc4b9;
+  --ok-weak: #ebf6ef;
+  --ok-line: #b9dfc7;
+
+  --code-bg: #f7f8fa;
+  --scrim: rgba(22, 26, 32, 0.35);
+  --shadow-pop: 0 12px 32px rgba(22, 26, 32, 0.16), 0 2px 6px rgba(22, 26, 32, 0.08);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #0d0f13;
+  --surface: #15181e;
+  --surface-2: #1b1f27;
+  --surface-3: #232833;
+  --line: #282d38;
+  --line-strong: #363c49;
+
+  --ink: #e6e8ed;
+  --ink-2: #aab0bc;
+  --ink-3: #7d8492;
+
+  --accent: #8fa6ff;
+  --accent-hover: #a9bbff;
+  --accent-ink: #0d0f13;
+  --accent-weak: rgba(143, 166, 255, 0.12);
+  --accent-line: rgba(143, 166, 255, 0.38);
+
+  --ok: #5cc98a;
+  --warn: #e0a640;
+  --err: #f08a72;
+  --err-weak: rgba(240, 138, 114, 0.1);
+  --err-line: rgba(240, 138, 114, 0.35);
+  --ok-weak: rgba(92, 201, 138, 0.1);
+  --ok-line: rgba(92, 201, 138, 0.32);
+
+  --code-bg: #111419;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #5b5d69;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --r-sm: 4px;
+  --r-md: 6px;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  --topbar-h: 52px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
+  padding: 0;
 }
 
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
+body {
+  min-height: 100dvh;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+#root {
+  min-height: 100dvh;
 }
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
 }
-p {
-  margin: 0;
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: var(--accent);
 }
 
 code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+kbd,
+pre {
+  font-family: var(--font-mono);
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-weak);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

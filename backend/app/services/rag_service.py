@@ -1,8 +1,9 @@
 """High-level orchestration for answering a question about an indexed repo.
 
 Ties together the individual RAG building blocks that live under
-``app/rag/``: embeddings (question -> vector), vector_store (retrieval),
-and llm (answer generation from the retrieved context).
+``app/rag/``: embeddings (question -> vector, via Ollama), vector_store
+(retrieval), the optional reranker, and llm (answer generation from the
+retrieved context, via Ollama).
 """
 
 from core.config import (
@@ -21,8 +22,9 @@ from models.user import User
 from rag.embeddings import embed_query
 from rag.github_loader import check_repo_access
 from rag.llm import generate_answer
+from rag.ollama_client import OllamaError
 from rag.vector_store import RetrievedChunk, similarity_search
-from rag.reranker import rerank
+from rag.reranker import RerankerUnavailableError, rerank
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,7 +92,7 @@ def _build_context(chunks: list[RetrievedChunk]) -> str:
     for chunk in chunks:
         location = chunk.file_path
         if chunk.start_line:
-            location += f" ({chunk.start_line}-{chunk.end_line}. sor)"
+            location += f" (lines {chunk.start_line}-{chunk.end_line})"
         sections.append(f"### {location}\n{chunk.content}")
     return "\n\n".join(sections)
 
@@ -102,7 +104,7 @@ async def answer_question(
     current_user: User,
 ) -> ChatResponse:
     if not repo_full_name:
-        raise HTTPException(status_code=400, detail="Válassz ki egy repót a kérdezéshez.")
+        raise HTTPException(status_code=400, detail="Select a repository to ask about.")
 
     result = await db.execute(select(Repository).where(Repository.full_name == repo_full_name))
     repository = result.scalar_one_or_none()
@@ -110,7 +112,7 @@ async def answer_question(
     if repository is None:
         raise HTTPException(
             status_code=404,
-            detail="Ehhez a repóhoz nincs hozzáférésed, vagy nem létezik.",
+            detail="This repository doesn't exist or you don't have access to it.",
         )
 
     access_result = await db.execute(
@@ -124,7 +126,7 @@ async def answer_question(
     if access is None:
         raise HTTPException(
             status_code=403,
-            detail="Nincs jogosultságod ehhez a repóhoz. Add hozzá előbb a listádhoz.",
+            detail="You don't have access to this repository in the app yet. Add it to your list first.",
         )
 
     access_age = datetime.now(timezone.utc) - access.last_verified_at
@@ -137,7 +139,7 @@ async def answer_question(
             await db.commit()
             raise HTTPException(
                 status_code=403,
-                detail="A hozzáférésed ehhez a repóhoz időközben megszűnt.",
+                detail="Your GitHub access to this repository has been revoked.",
             )
 
         access.last_verified_at = datetime.now(timezone.utc)
@@ -147,25 +149,29 @@ async def answer_question(
         raise HTTPException(
             status_code=409,
             detail=(
-                "Ez a repó még nincs (teljesen) indexelve. Indítsd el az "
-                "indexelést a repó kiválasztása mellett, és várd meg, amíg "
-                "elkészül."
+                "This repository isn't fully indexed yet. Start indexing it "
+                "and wait until it finishes."
             ),
         )
     
-    query_embedding = await embed_query(question)
+    try:
+        query_embedding = await embed_query(question)
 
-    candidate_count = RERANK_CANDIDATES if RERANK_ENABLED else RAG_TOP_K
-    retrieved = await similarity_search(db, repository.id, query_embedding, top_k=candidate_count)
+        candidate_count = RERANK_CANDIDATES if RERANK_ENABLED else RAG_TOP_K
+        retrieved = await similarity_search(db, repository.id, query_embedding, top_k=candidate_count)
 
-    if RERANK_ENABLED and retrieved:
-        retrieved = await rerank(question, retrieved, top_k=RAG_TOP_K)
+        if RERANK_ENABLED and retrieved:
+            retrieved = await rerank(question, retrieved, top_k=RAG_TOP_K)
+    except (OllamaError, RerankerUnavailableError) as exc:
+        # A model problem (Ollama not running, model not downloaded, ...):
+        # 503 with the explanation, which the frontend shows in the chat.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     retrieved = _apply_file_type_bias(retrieved)[:RAG_TOP_K]
 
     if not retrieved:
         return ChatResponse(
-            answer="Nem találtam releváns kódrészletet a kódbázisban ehhez a kérdéshez.",
+            answer="No relevant code was found in this repository for that question.",
             sources=[],
         )
 
@@ -177,7 +183,10 @@ async def answer_question(
     print("---------------------------------------------------------------------------------------------------")
 
     context = _build_context(retrieved)
-    answer_text = await generate_answer(question, context)
+    try:
+        answer_text = await generate_answer(question, context)
+    except OllamaError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     sources = [
         SourceGroup(

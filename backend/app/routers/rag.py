@@ -1,4 +1,4 @@
-from core.config import GITHUB_API_TOKEN
+from core.config import GITHUB_API_TOKEN, INDEXING_TIMEOUT_MINUTES
 from database.database import get_db
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from models.repository import (
@@ -10,7 +10,12 @@ from models.repository import (
 )
 from models.user import User
 from rag.github_loader import check_repo_access
-from rag.ingestion import get_or_create_repository, grant_repository_access, run_ingestion
+from rag.ingestion import (
+    fail_interrupted_indexing,
+    get_or_create_repository,
+    grant_repository_access,
+    run_ingestion,
+)
 from routers.user import get_current_user
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,7 +28,7 @@ def _split_full_name(repo_full_name: str) -> tuple[str, str]:
     if len(parts) != 2 or not all(parts):
         raise HTTPException(
             status_code=400,
-            detail="A repo_full_name formátuma 'owner/repo' legyen.",
+            detail="Use the owner/repository format, for example psf/requests.",
         )
     return parts[0], parts[1]
 
@@ -43,6 +48,14 @@ def _resolve_github_token(current_user: User) -> str | None:
     return current_user.github_access_token or GITHUB_API_TOKEN or None
 
 
+async def _fail_timed_out_indexing(db: AsyncSession) -> None:
+    """Fails indexing jobs that have been running for too long. Runs before
+    every status read (the frontend polls these while a repo is indexing),
+    so a hung job turns into "error" with a Retry button on its own."""
+
+    await fail_interrupted_indexing(db, older_than_minutes=INDEXING_TIMEOUT_MINUTES)
+
+
 @router.post("/ingest", response_model=RepositoryStatusResponse)
 async def ingest_repository(
     payload: IngestRequest,
@@ -59,12 +72,17 @@ async def ingest_repository(
     if not has_access:
         raise HTTPException(
             status_code=404,
-            detail="Nem található ilyen repó, vagy nincs hozzá hozzáférésed.",
+            detail="Repository not found, or you don't have access to it.",
         )
+
+    # Must run before the repository is loaded below, so a timed-out job no
+    # longer counts as "already indexing" and can be started again.
+    await _fail_timed_out_indexing(db)
 
     repository = await get_or_create_repository(db, owner, name)
     await grant_repository_access(db, current_user.id, repository.id)
 
+    # A job for this repo is genuinely still running - don't start a second one.
     if repository.status == RepositoryStatus.INDEXING:
         return _to_status_response(repository)
 
@@ -86,6 +104,8 @@ async def get_repository_status(
     current_user: User = Depends(get_current_user),
 ):
     """Used by the frontend to poll indexing progress for the selected repo."""
+
+    await _fail_timed_out_indexing(db)
 
     result = await db.execute(select(Repository).where(Repository.full_name == repo_full_name))
     repository = result.scalar_one_or_none()
@@ -117,7 +137,7 @@ async def add_repository(
     if not has_access:
         raise HTTPException(
             status_code=404,
-            detail="Nem található ilyen repó, vagy nincs hozzá hozzáférésed.",
+            detail="Repository not found, or you don't have access to it.",
         )
 
     repository = await get_or_create_repository(db, owner, name)
@@ -132,6 +152,8 @@ async def list_my_repositories(
     current_user: User = Depends(get_current_user),
 ):
     """A felhasználó által hozzáadott / lekérdezett repók listája."""
+
+    await _fail_timed_out_indexing(db)
 
     result = await db.execute(
         select(Repository)

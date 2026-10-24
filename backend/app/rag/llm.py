@@ -1,78 +1,54 @@
-"""Answer generation using a locally-running Hugging Face model.
+"""Answer generation with a local LLM served by Ollama (``/api/chat``).
 
-The model is downloaded from the Hugging Face Hub on first use (cached
-under the usual ``~/.cache/huggingface`` directory afterwards) and runs
-entirely locally via ``transformers`` - no external API calls. Loading
-and generation are both synchronous/CPU-heavy, so they run in a worker
-thread through ``asyncio.to_thread``.
+The model (LLM_MODEL_NAME, e.g. ``qwen3.5:4b``) runs inside Ollama, which
+loads it onto the GPU when one is available - no external API is called.
+The request is a plain async HTTP call, so generating an answer doesn't
+block the FastAPI event loop.
 """
 
-import asyncio
-import threading
+import logging
 
-from core.config import LLM_DEVICE, LLM_MAX_NEW_TOKENS, LLM_MODEL_NAME
+from core.config import (
+    LLM_CONTEXT_LENGTH,
+    LLM_MAX_NEW_TOKENS,
+    LLM_MODEL_NAME,
+    OLLAMA_KEEP_ALIVE,
+)
+from rag.ollama_client import ollama_request
 
-_pipeline = None
-_pipeline_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
+# Each sentence ends with a space on purpose: the pieces are concatenated,
+# and without it the sentences would run into each other ("...helpful.Only").
 SYSTEM_PROMPT = (
-    "You are a helpful software development assistant who answers "
-    "questions based on context taken from a given GitHub codebase. "
-    "Rely exclusively on the provided context, and do not make up anything "
-    "that is not present in it. If the answer cannot be found in the context,"
-    " clearly state that you cannot answer the question based on the available"
-    " code snippets. Respond concisely, in the given language, and reference relevant"
-    " filenames when helpful." \
-    "Only mention file paths that appear in the provided context metadata."
-    "Do not invent, normalize, rename, or infer file paths."
-    "If a file path is not present in the retrieved sources, do not include it in the answer."
-    "If the user asks where something is implemented, defined, handled, or executed,"
-    " prioritize source code files over documentation files. Documentation files may "
-    "only be used as secondary explanation."
-    "When the question asks where something is implemented in source code, prioritize files under `src/` "
-    "and clearly separate source files from documentation files."
-    "DO NOT RELY ON YOUR BASIC KNOWLEDGE, ONLY ANSWER VIA THE GIVEN SOURCES," \
-    "IF YOU DO NOT KNOW THE ANSWER SAY THAT"
+    "You are a helpful software development assistant who answers questions "
+    "based on context taken from a given GitHub codebase. "
+    "Rely exclusively on the provided context; do not use outside knowledge "
+    "and do not make up anything that is not present in it. "
+    "If the answer cannot be found in the context, clearly say that you cannot "
+    "answer the question based on the available code snippets. "
+    "Answer concisely, in the same language as the question. "
+    "Only mention file paths that appear in the provided context, exactly as "
+    "written there - do not invent, rename or normalize them. "
+    "If the question asks where something is implemented, defined, handled or "
+    "executed, prioritize source code files over documentation files, and use "
+    "documentation only as secondary explanation."
 )
 
-
-def _resolve_device() -> int:
-    """Returns the device index expected by transformers' pipeline() call."""
-    setting = LLM_DEVICE.strip().lower()
-
-    if setting == "cpu":
-        return -1
-    if setting == "cuda":
-        return 0
-    if setting == "auto":
-        import torch
-
-        return 0 if torch.cuda.is_available() else -1
-
-    try:
-        return int(setting)
-    except ValueError:
-        return -1
-
-
-def _get_pipeline():
-    global _pipeline
-    if _pipeline is None:
-        with _pipeline_lock:
-            if _pipeline is None:
-                from transformers import pipeline
-
-                device = _resolve_device()
-                _pipeline = pipeline(
-                    "text-generation",
-                    model=LLM_MODEL_NAME,
-                    device=device,
-                    torch_dtype="auto",
-                )
-
-                if _pipeline.tokenizer.pad_token_id is None:
-                    _pipeline.tokenizer.pad_token_id = _pipeline.tokenizer.eos_token_id
-    return _pipeline
+# Sampling settings follow Qwen's recommendation for non-thinking mode, with
+# a lower temperature because answers must stick to the context. They are
+# sent with every request because they override the model's own defaults in
+# Ollama - qwen3.5's Ollama build, for example, ships with temperature 1 and
+# presence_penalty 1.5. Repetition/presence penalties are switched off on
+# purpose: they also penalize tokens copied from the prompt, which garbled
+# file paths and identifiers (e.g. "reranker.py" -> "reanker.py").
+GENERATION_OPTIONS = {
+    "temperature": 0.3,
+    "top_p": 0.8,
+    "top_k": 20,
+    "repeat_penalty": 1.0,
+    "presence_penalty": 0.0,
+}
 
 
 def _build_messages(question: str, context: str) -> list[dict]:
@@ -88,27 +64,52 @@ def _build_messages(question: str, context: str) -> list[dict]:
     ]
 
 
-def _generate(question: str, context: str) -> str:
-    text_generator = _get_pipeline()
-    messages = _build_messages(question, context)
-
-    outputs = text_generator(
-        messages,
-        max_new_tokens=LLM_MAX_NEW_TOKENS,
-        do_sample=True,
-        repetition_penalty=1.15,
-        no_repeat_ngram_size=4,
-    )
-
-    generated = outputs[0]["generated_text"]
-
-    # Chat-style input returns the full conversation (list of messages);
-    # the newly generated reply is the last one.
-    if isinstance(generated, list):
-        return str(generated[-1].get("content", "")).strip()
-
-    return str(generated).strip()
+def _strip_thinking(text: str) -> str:
+    """Safety net: if the model still emitted a <think>...</think> block
+    inside the answer, keep only what comes after it."""
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    return text.strip()
 
 
 async def generate_answer(question: str, context: str) -> str:
-    return await asyncio.to_thread(_generate, question, context)
+    data = await ollama_request(
+        "POST",
+        "/api/chat",
+        {
+            "model": LLM_MODEL_NAME,
+            "messages": _build_messages(question, context),
+            "stream": False,
+            # Thinking models (Qwen3, Qwen3.5, ...) think by default in
+            # Ollama: they write a long reasoning block before the answer,
+            # which used up the token budget and cut the real answer off.
+            # Ollama only rejects think=true for models that can't think, so
+            # think=false is safe to send to any model.
+            "think": False,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+            "options": {
+                **GENERATION_OPTIONS,
+                "num_predict": LLM_MAX_NEW_TOKENS,
+                # Without this, Ollama uses its own default context size
+                # (4096 tokens on GPUs under 24 GB) and silently cuts a
+                # longer prompt.
+                "num_ctx": LLM_CONTEXT_LENGTH,
+            },
+        },
+    )
+
+    prompt_tokens = data.get("prompt_eval_count") or 0
+    if prompt_tokens + LLM_MAX_NEW_TOKENS > LLM_CONTEXT_LENGTH:
+        logger.warning(
+            "The prompt (%d tokens) plus the answer budget (%d) exceeds "
+            "LLM_CONTEXT_LENGTH (%d); part of the context may have been cut. "
+            "Raise LLM_CONTEXT_LENGTH or lower RAG_TOP_K / RAG_CHUNK_SIZE.",
+            prompt_tokens,
+            LLM_MAX_NEW_TOKENS,
+            LLM_CONTEXT_LENGTH,
+        )
+    if data.get("done_reason") == "length":
+        logger.info("The answer was cut off at LLM_MAX_NEW_TOKENS=%d.", LLM_MAX_NEW_TOKENS)
+
+    answer = _strip_thinking(str((data.get("message") or {}).get("content") or ""))
+    return answer or "The model returned an empty answer. Try asking again."

@@ -9,9 +9,8 @@ pydantic[email]
 httpx
 
 # --- RAG pipeline ---
+# The embedding model and the LLM run in Ollama, a separate program that is
+# installed on its own (see README "Setup - 2. Ollama"); the backend talks
+# to it over HTTP with httpx (above), so no ML libraries are needed here.
 pgvector
 langchain-text-splitters>=0.2
-sentence-transformers>=3.0
-transformers>=4.44
-torch
-bitsandbytes>=0.43

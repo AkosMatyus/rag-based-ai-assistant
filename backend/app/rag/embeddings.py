@@ -1,50 +1,70 @@
-"""Local embedding generation via SentenceTransformers.
+"""Embedding generation through Ollama's ``/api/embed`` endpoint.
 
-Model loading and ``.encode()`` calls are synchronous/CPU-bound, so both
-are run in a worker thread through ``asyncio.to_thread`` to keep the
-FastAPI event loop free for other requests. The model itself is loaded
-once (lazily, on first use) and cached as a module-level singleton.
+The embedding model (EMBEDDING_MODEL_NAME, e.g. ``qwen3-embedding:0.6b``)
+runs inside Ollama, which returns L2-normalized vectors - so cosine
+similarity in pgvector works on them directly. Chunks are sent in batches
+of EMBEDDING_BATCH_SIZE per request while indexing.
+
+Questions and indexed chunks get different prefixes
+(EMBEDDING_QUERY_PREFIX / EMBEDDING_DOCUMENT_PREFIX): instruction-tuned
+embedding models such as Qwen3-Embedding expect a task instruction in front
+of the query only.
 """
 
-import asyncio
-import threading
-
-from core.config import EMBEDDING_MODEL_NAME
-from sentence_transformers import SentenceTransformer
-
-_model: SentenceTransformer | None = None
-_model_lock = threading.Lock()
-
-
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        with _model_lock:
-            if _model is None:
-                _model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    return _model
+from core.config import (
+    EMBEDDING_BATCH_SIZE,
+    EMBEDDING_DIMENSIONS,
+    EMBEDDING_DOCUMENT_PREFIX,
+    EMBEDDING_MODEL_NAME,
+    EMBEDDING_QUERY_PREFIX,
+    OLLAMA_KEEP_ALIVE,
+)
+from rag.ollama_client import OllamaError, ollama_request
 
 
-def _encode(texts: list[str]) -> list[list[float]]:
-    model = _get_model()
-    vectors = model.encode(
-        texts,
-        batch_size=32,
-        show_progress_bar=False,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
+async def _embed(inputs: list[str]) -> list[list[float]]:
+    data = await ollama_request(
+        "POST",
+        "/api/embed",
+        {
+            "model": EMBEDDING_MODEL_NAME,
+            "input": inputs,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+        },
     )
-    return vectors.tolist()
+
+    vectors = data.get("embeddings") or []
+    if len(vectors) != len(inputs):
+        raise OllamaError(
+            f"Ollama returned {len(vectors)} embeddings for {len(inputs)} texts."
+        )
+
+    # Checked here so a wrong setting produces a clear message instead of a
+    # pgvector "expected N dimensions" error at insert time.
+    for vector in vectors:
+        if len(vector) != EMBEDDING_DIMENSIONS:
+            raise OllamaError(
+                f'The embedding model "{EMBEDDING_MODEL_NAME}" returns '
+                f"{len(vector)}-dimensional vectors, but EMBEDDING_DIMENSIONS is "
+                f"{EMBEDDING_DIMENSIONS}. Set EMBEDDING_DIMENSIONS={len(vector)} in "
+                "backend/.env and restart the backend."
+            )
+
+    return vectors
 
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embeds a batch of texts (e.g. document chunks)."""
-    if not texts:
-        return []
-    return await asyncio.to_thread(_encode, texts)
+    """Embeds document chunks (used while indexing)."""
+
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+        batch = texts[start : start + EMBEDDING_BATCH_SIZE]
+        vectors.extend(await _embed([EMBEDDING_DOCUMENT_PREFIX + text for text in batch]))
+    return vectors
 
 
 async def embed_query(text: str) -> list[float]:
-    """Embeds a single query string."""
-    vectors = await embed_texts([text])
+    """Embeds a single question (used when answering)."""
+
+    vectors = await _embed([EMBEDDING_QUERY_PREFIX + text])
     return vectors[0]

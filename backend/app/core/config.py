@@ -9,6 +9,7 @@ DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASS = os.getenv("DB_PASS", "postgres")
 DB_NAME = os.getenv("DB_NAME", "postgres")
 DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
 
 # --- Auth ---------------------------------------------------------------
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your_secret_key")
@@ -44,16 +45,50 @@ RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
 RAG_MAX_FILE_SIZE_BYTES = int(os.getenv("RAG_MAX_FILE_SIZE_BYTES", str(300 * 1024)))
 # Hard cap on number of files read from a single repo per ingestion run.
 RAG_MAX_FILES_PER_REPO = int(os.getenv("RAG_MAX_FILES_PER_REPO", "800"))
+# Safety net for a hung indexing job: a repository that has been "indexing"
+# for longer than this is marked as failed, so the user can start it again.
+# (Jobs killed by a server restart are failed immediately at startup instead.)
+INDEXING_TIMEOUT_MINUTES = int(os.getenv("INDEXING_TIMEOUT_MINUTES", "60"))
+
+# --- Ollama (runs the embedding model and the LLM) ---------------------------------------------------------------
+# Both models run in Ollama, a separate local program the backend talks to
+# over HTTP - see README "Setup - 2. Ollama". 127.0.0.1 rather than
+# "localhost": on Windows, "localhost" may be tried as IPv6 (::1) first,
+# which Ollama doesn't listen on, and every request would wait for that
+# attempt to fail.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+# Upper limit for one Ollama call. Generous on purpose: the first call after
+# a model was unloaded also includes loading it into (GPU) memory.
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
+# How long Ollama keeps a model loaded after its last use (Ollama's own
+# default is 5 minutes, after which the next question waits for a reload).
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 
 # --- RAG: embeddings ---------------------------------------------------------------
-# Local, CPU-friendly sentence-transformers model. 384-dim output.
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
-EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "384"))
+# Ollama model name. qwen3-embedding:0.6b: multilingual (100+ languages)
+# and trained for code retrieval, 32k-token context, 1024-dim output.
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "qwen3-embedding:0.6b")
+# Must match the embedding model's output size; it is also the size of the
+# document_chunks.embedding column (see main.py for what happens when it changes).
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1024"))
+# How many chunks are sent to Ollama in one /api/embed request while indexing.
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
+# Text put in front of every question / every indexed chunk before embedding.
+# Qwen3-Embedding expects a one-sentence task instruction on queries (in
+# English, in exactly this "Instruct: ...\nQuery:" shape) and nothing on
+# documents. Other models need other prefixes (e.g. nomic-embed-text uses
+# "search_query: " / "search_document: "), or none at all.
+EMBEDDING_QUERY_PREFIX = os.getenv(
+    "EMBEDDING_QUERY_PREFIX",
+    "Instruct: Given a question about a software repository, retrieve the "
+    "source code or documentation that answers it\nQuery:",
+)
+EMBEDDING_DOCUMENT_PREFIX = os.getenv("EMBEDDING_DOCUMENT_PREFIX", "")
 
 # --- RAG: retrieval ---------------------------------------------------------------
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
 
-RERANK_ENABLED = os.getenv("RERANK_ENABLED", "true").lower() == "true"
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() == "true"
 RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "15"))
 RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3")
 
@@ -64,10 +99,10 @@ CODE_FILE_BOOST = float(os.getenv("CODE_FILE_BOOST", "0.05"))
 DOC_FILE_PENALTY = float(os.getenv("DOC_FILE_PENALTY", "0.08"))
 
 
-# --- RAG: local Hugging Face LLM for answer generation ---------------------------------------------------------------
-
-LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
+# --- RAG: LLM used for answer generation (runs in Ollama) ---------------------------------------------------------------
+LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen3.5:4b")
 LLM_MAX_NEW_TOKENS = int(os.getenv("LLM_MAX_NEW_TOKENS", "512"))
-# "auto" | "cpu" | "cuda" | a specific CUDA device index (e.g. "0")
-LLM_DEVICE = os.getenv("LLM_DEVICE", "auto")
-
+# Context window requested from Ollama for each answer (prompt + answer, in
+# tokens). Set explicitly because Ollama's own default is only 4096 tokens
+# on GPUs with less than 24 GB of VRAM, and a longer prompt would be cut.
+LLM_CONTEXT_LENGTH = int(os.getenv("LLM_CONTEXT_LENGTH", "8192"))
